@@ -136,23 +136,25 @@ def init_interfaces(tensors, rsets, N, device):
 
 
 def cross(
-    function: Callable = lambda x: x,
-    domain=None,
-    tensors: Union[Any, Sequence[Any]] = None,
-    function_arg: str = "vectors",
-    ranks_tt: Union[int, Sequence[int]] = None,
-    kickrank: int = 3,
-    rmax: int = 100,
-    eps: float = 1e-6,
-    max_iter: int = 25,
-    val_size: int = 1000,
-    verbose: bool = True,
-    return_info: bool = False,
-    record_samples: bool = False,
-    _minimize: bool = False,
-    device: Any = None,
-    suppress_warnings: bool = False,
-    detach_evaluations: bool = False,
+        function: Callable = lambda x: x,
+        domain=None,
+        tensors: Union[Any, Sequence[Any]] = None,
+        function_arg: str = "vectors",
+        ranks_tt: Union[int, Sequence[int]] = None,
+        kickrank: int = 3,
+        rmax: int = 100,
+        eps: float = 1e-6,
+        max_iter: int = 25,
+        early_stopping_patience: int = 0,
+        early_stopping_tolerance: float = 1e-5,
+        val_size: int = 1000,
+        verbose: bool = True,
+        return_info: bool = False,
+        record_samples: bool = False,
+        _minimize: bool = False,
+        device: Any = None,
+        suppress_warnings: bool = False,
+        detach_evaluations: bool = False,
 ):
     """
     Cross-approximation routine that samples a black-box function and returns an N-dimensional tensor train approximating it. It accepts either:
@@ -186,6 +188,8 @@ def cross(
     :param rmax: this rank will not be surpassed
     :param eps: the procedure will stop after this validation error is met (as measured after each iteration)
     :param max_iter: int
+    :param early_stopping_patience: if > 0, stop if validation error does not improve for this many iterations (default is 0)
+    :param early_stopping_tolerance: tolerance for validation error improvement (default is 1e-5)
     :param val_size: size of the validation set
     :param verbose: default is True
     :param return_info: if True, will also return a dictionary with informative metrics about the algorithm's outcome
@@ -307,6 +311,8 @@ def cross(
         )
     start = time.time()
     converged = False
+    best_val_eps = float("inf")
+    patience_counter = 0
 
     info = {"nsamples": 0, "eval_time": 0, "val_epss": [], "min": 0, "argmin": None}
     if record_samples:
@@ -314,7 +320,7 @@ def cross(
         info["sample_values"] = torch.zeros(0).to(device)
 
     def evaluate_function(
-        j,
+            j,
     ):  # Evaluate function over Rs[j] x Rs[j+1] fibers, each of size I[j]
         Xs = []
         for k, t in enumerate(tensors):
@@ -345,7 +351,7 @@ def cross(
             )  # Function used by I. Oseledets for TT minimization in ttpy
             evaluation_argmax = torch.argmax(evaluation)
             eval_min = (
-                torch.tan(np.pi / 2 - evaluation[evaluation_argmax]) + info["min"]
+                    torch.tan(np.pi / 2 - evaluation[evaluation_argmax]) + info["min"]
             )
             if info["min"] == 0 or eval_min < info["min"]:
                 coords = np.unravel_index(
@@ -353,9 +359,9 @@ def cross(
                 )
                 info["min"] = eval_min
                 info["argmin"] = (
-                    tuple(lsets[j][coords[0]][1:])
-                    + tuple([coords[1]])
-                    + tuple(rsets[j][coords[2]][:-1])
+                        tuple(lsets[j][coords[0]][1:])
+                        + tuple([coords[1]])
+                        + tuple(rsets[j][coords[2]][:-1])
                 )
 
         # Check for nan/inf values
@@ -459,6 +465,17 @@ def cross(
         info["val_epss"].append(val_eps)
         if val_eps < eps:
             converged = True
+
+        stagnated = False
+        if early_stopping_patience > 0 and not _minimize:
+            if best_val_eps - val_eps.item() > early_stopping_tolerance:
+                best_val_eps = val_eps.item()
+                patience_counter = 0
+            else:
+                patience_counter += 1
+            if patience_counter >= early_stopping_patience:
+                stagnated = True
+
         if verbose:  # Print status
             if _minimize:
                 print("| best: {:.8g}".format(info["min"]), end="")
@@ -472,11 +489,13 @@ def cross(
             )
             if converged:
                 print(" <- converged: eps < {}".format(eps))
+            elif stagnated:
+                print(" <- stagnated: val_eps did not improve")
             elif i == max_iter - 1:
                 print(" <- max_iter was reached: {}".format(max_iter))
             else:
                 print()
-        if converged:
+        if converged or stagnated:
             break
         elif i < max_iter - 1 and kickrank is not None:  # Augment ranks
             newRs = Rs.copy()
@@ -510,7 +529,7 @@ def cross(
                 info["nsamples"],
                 info["eval_time"],
                 info["nsamples"] / info["eval_time"],
-            )
+                )
         )
         print()
 
